@@ -2,7 +2,6 @@
 #include <WiFiUdp.h>
 #include <ESP32Servo.h>
 #include <WiFiManager.h>
-#include <AccelStepper.h>
 
 const int UDP_PORT = 8888;
 const int NUM_SERVOS = 5;
@@ -27,8 +26,12 @@ bool stepper_enabled = false;
 bool stepper_is_moving = false;
 float stepper_committed_target = 0.0;
 
+TaskHandle_t stepperTaskHandle = NULL;
+volatile long target_step_position = 0;
+volatile long current_step_position = 0;
+const int STEP_SPEED_HZ = 700;
+
 Servo servos[NUM_SERVOS];
-AccelStepper stepper(AccelStepper::DRIVER, STEPPER_STEP_PIN, STEPPER_DIR_PIN);
 
 WiFiUDP udp;
 WiFiManager wifiManager;
@@ -41,6 +44,37 @@ const int MAX_SERVO_ANGLE = 180;
 
 bool diagnostic_mode = false;
 bool debug_mode = false;
+
+void stepperTask(void *parameter) {
+  unsigned long last_step_time = 0;
+  
+  while (true) {
+    unsigned long now = micros();
+    unsigned long step_interval = 1000000UL / STEP_SPEED_HZ;
+    
+    if (current_step_position != target_step_position) {
+      if (now - last_step_time >= step_interval) {
+        bool dir = (target_step_position > current_step_position);
+        digitalWrite(STEPPER_DIR_PIN, dir ? HIGH : LOW);
+        
+        digitalWrite(STEPPER_STEP_PIN, HIGH);
+        delayMicroseconds(5);
+        digitalWrite(STEPPER_STEP_PIN, LOW);
+        
+        if (dir) {
+          current_step_position++;
+        } else {
+          current_step_position--;
+        }
+        
+        last_step_time = now;
+      }
+      delayMicroseconds(50);
+    } else {
+      vTaskDelay(1);
+    }
+  }
+}
 
 void setup() {
   Serial.begin(115200);
@@ -146,7 +180,6 @@ void runDiagnostics() {
     Serial.println("8. Test servo 3 (Pitch)");
     Serial.println("9. Test servo 4 (Yaw)");
     Serial.println("a. Test all servos");
-    Serial.println("b. Test bidirectional rotation");
     Serial.println("s. Show status");
     Serial.println("0. Exit diagnostics");
     Serial.println("\nEnter choice: ");
@@ -190,10 +223,6 @@ void runDiagnostics() {
       case 'A':
         testAllServos();
         break;
-      case 'b':
-      case 'B':
-        testBidirectionalRotation();
-        break;
       case 's':
       case 'S':
         checkPinStates();
@@ -210,57 +239,6 @@ void runDiagnostics() {
   }
 }
 
-void testBidirectionalRotation() {
-  Serial.println("\n=== Testing Bidirectional Rotation ===");
-  Serial.println("This tests shortest-path movement");
-  
-  enableStepper();
-  stepper.setMaxSpeed(2000);
-  stepper.setAcceleration(1000);
-  
-  Serial.println("\n1. Moving to 10°...");
-  moveStepperToAngle(10);
-  delay(1000);
-  
-  Serial.println("2. Moving to 350° (should go backwards -20°)...");
-  moveStepperToAngle(350);
-  delay(1000);
-  
-  Serial.println("3. Moving to 10° (should go forwards +20°)...");
-  moveStepperToAngle(10);
-  delay(1000);
-  
-  Serial.println("4. Moving to 180° (should go forwards +170°)...");
-  moveStepperToAngle(180);
-  delay(1000);
-  
-  Serial.println("5. Returning to 0°...");
-  moveStepperToAngle(0);
-  
-  delay(2000);
-  disableStepper();
-  Serial.println("Test complete!\n");
-}
-
-void moveStepperToAngle(float target_angle) {
-  float current_angle = stepperStepsToAngle(stepper.currentPosition());
-  
-  float delta = target_angle - current_angle;
-  delta = normalizeAngleDelta(delta);
-  
-  float new_angle = current_angle + delta;
-  long target_steps = stepperAngleToSteps(new_angle);
-  
-  Serial.printf("  Current: %.1f°, Target: %.1f°, Delta: %.1f°, Steps: %ld\n", 
-                current_angle, target_angle, delta, target_steps);
-  
-  stepper.moveTo(target_steps);
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-    delay(1);
-  }
-}
-
 void testStepperAngle(float base_angle_degrees) {
   Serial.printf("\n=== Testing Stepper: %.0f° Base Rotation ===\n", base_angle_degrees);
   
@@ -273,14 +251,11 @@ void testStepperAngle(float base_angle_degrees) {
   
   enableStepper();
   
-  stepper.setMaxSpeed(2000);
-  stepper.setAcceleration(1000);
-  stepper.moveTo(target_steps);
+  target_step_position = target_steps;
   
   Serial.println("Moving...");
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-    delay(1);
+  while (current_step_position != target_step_position) {
+    delay(10);
   }
   
   Serial.println("Target reached! Waiting 2 seconds...");
@@ -291,10 +266,9 @@ void testStepperAngle(float base_angle_degrees) {
   
   enableStepper();
   Serial.println("Returning to 0°...");
-  stepper.moveTo(0);
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
-    delay(1);
+  target_step_position = 0;
+  while (current_step_position != target_step_position) {
+    delay(10);
   }
   
   delay(2000);
@@ -371,11 +345,11 @@ void checkPinStates() {
   
   Serial.printf("\nStepper enabled: %s\n", stepper_enabled ? "YES" : "NO");
   Serial.printf("Stepper position: %ld steps (%.1f° base)\n", 
-                stepper.currentPosition(), 
-                stepperStepsToAngle(stepper.currentPosition()));
+                current_step_position, 
+                stepperStepsToAngle(current_step_position));
   Serial.printf("Stepper target: %ld steps (%.1f° base)\n", 
-                stepper.targetPosition(),
-                stepperStepsToAngle(stepper.targetPosition()));
+                target_step_position,
+                stepperStepsToAngle(target_step_position));
   
   Serial.println("\nServos:");
   const char* joint_names[] = {"Shoulder", "Elbow", "Roll", "Pitch", "Yaw"};
@@ -451,18 +425,28 @@ void saveConfigCallback() {
 void initializeStepper() {
   Serial.println("\nInitializing stepper...");
   
+  pinMode(STEPPER_STEP_PIN, OUTPUT);
+  pinMode(STEPPER_DIR_PIN, OUTPUT);
   pinMode(STEPPER_EN_PIN, OUTPUT);
   forceDisableStepper();
   
-  stepper.setMaxSpeed(2000);
-  stepper.setAcceleration(1000);
-  stepper.setCurrentPosition(0);
+  current_step_position = 0;
+  target_step_position = 0;
   
-  Serial.printf("  Max speed: 2000 steps/s\n");
-  Serial.printf("  Acceleration: 1000 steps/s²\n");
+  xTaskCreatePinnedToCore(
+    stepperTask,
+    "StepperTask",
+    4096,
+    NULL,
+    2,
+    &stepperTaskHandle,
+    0
+  );
+  
+  Serial.printf("  Speed: %d steps/s\n", STEP_SPEED_HZ);
   Serial.printf("  Gear ratio: %.1f:1\n", GEAR_RATIO);
   Serial.printf("  Steps/base rev: %ld\n", (long)(TOTAL_STEPS * GEAR_RATIO));
-  Serial.println("✓ Stepper initialized (DISABLED)");
+  Serial.println("✓ Stepper initialized on Core 0");
 }
 
 void initializeServos() {
@@ -496,7 +480,7 @@ void loop() {
   updateStepper();
   updateServos();
   checkStepperTimeout();
-  delay(1);
+  delay(10);
 }
 
 void handleSerialCommands() {
@@ -510,10 +494,10 @@ void handleSerialCommands() {
       Serial.printf("Debug mode: %s\n", debug_mode ? "ON" : "OFF");
     } else if (cmd == "status") {
       Serial.println("\n=== Status ===");
-      Serial.printf("Current angle: %.1f°\n", stepperStepsToAngle(stepper.currentPosition()));
+      Serial.printf("Current angle: %.1f°\n", stepperStepsToAngle(current_step_position));
       Serial.printf("Target angle: %.1f°\n", stepper_committed_target);
       Serial.printf("Is moving: %s\n", stepper_is_moving ? "YES" : "NO");
-      Serial.printf("Distance to go: %ld steps\n", stepper.distanceToGo());
+      Serial.printf("Distance to go: %ld steps\n", target_step_position - current_step_position);
       Serial.printf("Debug mode: %s\n", debug_mode ? "ON" : "OFF");
     } else if (cmd == "home") {
       homeAll();
@@ -565,7 +549,7 @@ void handleUDPCommands() {
         }
         
         if (!stepper_is_moving) {
-          float current_angle = stepperStepsToAngle(stepper.currentPosition());
+          float current_angle = stepperStepsToAngle(current_step_position);
           
           float delta = new_base_angle - current_angle;
           delta = normalizeAngleDelta(delta);
@@ -583,7 +567,7 @@ void handleUDPCommands() {
             }
             
             enableStepper();
-            stepper.moveTo(new_target_steps);
+            target_step_position = new_target_steps;
             stepper_is_moving = true;
             target_angles[0] = new_base_angle;
             last_stepper_move_time = millis();
@@ -628,21 +612,19 @@ float normalizeAngleDelta(float delta) {
 }
 
 void updateStepper() {
-  while (stepper.distanceToGo() != 0) {
-    stepper.run();
+  if (current_step_position != target_step_position) {
     last_stepper_move_time = millis();
-    
-    float current_angle = stepperStepsToAngle(stepper.currentPosition());
-    current_angles[0] = current_angle;
-
-    delay(1);
+    stepper_is_moving = true;
+  } else {
+    stepper_is_moving = false;
   }
-
-  stepper_is_moving = false;
+  
+  float current_angle = stepperStepsToAngle(current_step_position);
+  current_angles[0] = current_angle;
 }
 
 void checkStepperTimeout() {
-  if (stepper_enabled && stepper.distanceToGo() == 0) {
+  if (stepper_enabled && current_step_position == target_step_position) {
     if (millis() - last_stepper_move_time > STEPPER_IDLE_TIMEOUT) {
       disableStepper();
     }
@@ -650,7 +632,7 @@ void checkStepperTimeout() {
 }
 
 void updateServos() {
-  const float SMOOTHING_FACTOR = 0.5;
+  const float SMOOTHING_FACTOR = 0.08;
   
   for (int i = 1; i < TOTAL_JOINTS; i++) {
     current_angles[i] = current_angles[i] * (1 - SMOOTHING_FACTOR) + 
@@ -664,7 +646,7 @@ void updateServos() {
 void emergencyStopAll() {
   Serial.println("🛑 EMERGENCY STOP");
   
-  stepper.stop();
+  target_step_position = current_step_position;
   disableStepper();
   stepper_is_moving = false;
   stepper_committed_target = 0;
@@ -681,7 +663,7 @@ void homeAll() {
   
   stepper_committed_target = 0;
   target_angles[0] = 0;
-  stepper.moveTo(0);
+  target_step_position = 0;
   enableStepper();
   stepper_is_moving = true;
   last_stepper_move_time = millis();

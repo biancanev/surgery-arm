@@ -288,7 +288,7 @@ class RobotSimulator:
         return trajectory
     
     def animate_to_target(self, target_angles):
-        speed = self.slider_speed.val
+        speed = self.slider_speed.val * 10
         num_steps = int(50 / speed)
         
         trajectory = self.generate_trajectory(

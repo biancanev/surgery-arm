@@ -100,7 +100,7 @@ class RobotArm:
             pos_error_norm = np.linalg.norm(pos_error)
             rot_error_norm = np.linalg.norm(rot_error)
             
-            if pos_error_norm < tol and rot_error_norm < 0.1:
+            if pos_error_norm < tol and rot_error_norm < 0.05:
                 print(f"IK converged in {iteration} iterations, pos_err: {pos_error_norm:.6f}m, rot_err: {rot_error_norm:.4f}rad")
                 return q, True
             

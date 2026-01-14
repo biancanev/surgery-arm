@@ -1,5 +1,3 @@
-# File: software/simulator.py
-
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.widgets import Slider, Button, RadioButtons, CheckButtons
@@ -8,21 +6,26 @@ from arm_model import RobotArm
 from surface_model import SurgicalSurface, IncisionPlanner
 
 class RobotSimulator:
-    def __init__(self, use_esp32=False, esp32_ip=None):
+    def __init__(self, use_esp32=False, esp32_ip=None, visual_offset=None):
         self.fig = plt.figure("6-DOF Surgery Robot Simulator", figsize=(16, 9))
         self.ax = self.fig.add_subplot(111, projection='3d', position=[0.45, 0.1, 0.5, 0.85])
         
         self.dh_params = [
             [0, 0.10, 0, np.pi/2],
             [0, 0, 0.25, 0],
-            [0, 0, 0.15, 0],
-            [0, 0, 0, np.pi/2],
-            [0, 0.03, 0, np.pi/2],
-            [0, 0.03, 0, 0],
+            [np.pi/2, 0, 0.15, np.pi/2],
+            [0, 0.05715, 0, np.pi/2],
+            [0, 0.05715, 0, -np.pi/2],
+            [0, 0.0762, 0, 0],
         ]
         
         self.robot = RobotArm(self.dh_params)
         self.joint_angles = np.zeros(self.robot.n_joints)
+
+        if visual_offset is None:
+            self.visual_offset = np.zeros(6)
+        else:
+            self.visual_offset = np.array(visual_offset)
         
         self.use_esp32 = use_esp32
         self.esp32 = None
@@ -288,7 +291,7 @@ class RobotSimulator:
         return trajectory
     
     def animate_to_target(self, target_angles):
-        speed = self.slider_speed.val * 10
+        speed = self.slider_speed.val
         num_steps = int(50 / speed)
         
         trajectory = self.generate_trajectory(
@@ -372,7 +375,8 @@ class RobotSimulator:
         self.update_plot()
     
     def update_plot(self):
-        positions = self.robot.get_joint_positions(self.joint_angles)
+        visual_angles = self.joint_angles + self.visual_offset
+        positions = self.robot.get_joint_positions(visual_angles)
         
         self.arm_line.set_data(positions[:, 0], positions[:, 1])
         self.arm_line.set_3d_properties(positions[:, 2])
@@ -381,7 +385,7 @@ class RobotSimulator:
         self.end_effector.set_data([end_pos[0]], [end_pos[1]])
         self.end_effector.set_3d_properties([end_pos[2]])
         
-        T_current, _ = self.robot.forward_kinematics(self.joint_angles)
+        T_current, _ = self.robot.forward_kinematics(visual_angles)
         R_current = T_current[:3, :3]
         
         axis_length = 0.08
@@ -553,11 +557,11 @@ if __name__ == '__main__':
     print("="*60)
     print("Joints: Stepper Base + 5 Servos")
     print("  Joint 0: Base (Stepper)")
-    print("  Joint 1: Shoulder")
-    print("  Joint 2: Elbow")
-    print("  Joint 3: Wrist Roll")
-    print("  Joint 4: Wrist Pitch")
-    print("  Joint 5: Wrist Yaw/Tool")
+    print("  Joint 1: Shoulder (250mm link)")
+    print("  Joint 2: Elbow (150mm link)")
+    print("  Joint 3: Wrist Roll (57.15mm link)")
+    print("  Joint 4: Wrist Pitch (57.15mm link)")
+    print("  Joint 5: Wrist Yaw (76.2mm tool)")
     print("="*60)
     
     use_hardware = False
@@ -574,7 +578,9 @@ if __name__ == '__main__':
             use_hardware = True
             esp32_ip = input("Enter ESP32 IP address: ")
     
-    sim = RobotSimulator(use_esp32=use_hardware, esp32_ip=esp32_ip)
+    visual_adj = [0, np.pi/4, -2*np.pi/3, 0, np.pi/6, 0]
+    
+    sim = RobotSimulator(use_esp32=use_hardware, esp32_ip=esp32_ip, visual_offset=visual_adj)
     
     sim.add_surface('plane', 
                     center=np.array([0.35, 0.0, 0.25]),
